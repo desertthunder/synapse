@@ -1,9 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"os"
+	"runtime"
 	"sync"
+	"time"
 )
 
 const (
@@ -35,9 +42,37 @@ const (
 	Bold       ANSIColor = "\033[1m"
 	Underline  ANSIColor = "\033[4m"
 	Inverse    ANSIColor = "\033[7m"
+
+	DebugLevel    LogLevel = -4
+	InfoLevel     LogLevel = 0
+	WarnLevel     LogLevel = 4
+	ErrorLevel    LogLevel = 8
+	CriticalLevel LogLevel = 12
+	FatalLevel    LogLevel = 16
+	NoLevel       LogLevel = math.MaxInt32
 )
 
+type LogLevel int32
+
 type ANSIColor string
+
+type HandlerOpts struct {
+	Level      slog.Level
+	TimeLayout string
+	Prefix     string
+}
+
+// Logger is the Custom Structured Logging Handler implementation for synapse
+//
+// It uses a pointer to a [sync.Mutex] to ensure that no other goroutines access the
+// data passed through an io.Writer
+type Logger struct {
+	Options HandlerOpts
+	Writer  io.Writer
+	Ctx     context.Context
+	Mu      *sync.Mutex
+	Attrs   []slog.Attr
+}
 
 func (c ANSIColor) String() string {
 	return string(c)
@@ -52,38 +87,156 @@ func (c ANSIColor) AddBackgroundColor(s string) string {
 }
 
 func Colorize(s string, fg ANSIColor, bg ANSIColor) string {
-	coloredText := fg.AddForegroundColor(s)
-	return bg.AddBackgroundColor(coloredText)
+	return fg.String() + bg.String() + s + Reset.String()
 }
 
-type HOpts struct {
-	Level slog.Level
-}
-type CustomHandler struct {
-	Options HOpts
-	Mu      *sync.Mutex
+func (l LogLevel) String() string {
+	switch l {
+	case ErrorLevel:
+		return "ERROR"
+	case CriticalLevel:
+		return "CRITICAL"
+	case DebugLevel:
+		return "DEBUG"
+	case WarnLevel:
+		return "WARNING"
+	case FatalLevel:
+		return "FATAL"
+	}
+
+	return "INFO"
 }
 
-const (
-	LevelDebug    slog.Level = -4
-	LevelInfo     slog.Level = 0
-	LevelWarn     slog.Level = 4
-	LevelError    slog.Level = 8
-	LevelCritical slog.Level = 12
-)
+func (l LogLevel) TagColor() (fg ANSIColor, bg ANSIColor) {
+	switch l {
+	case ErrorLevel:
+	case CriticalLevel:
+		return White, BgRed
+	case DebugLevel:
+		return BoldWhite, BgBlue
+	case WarnLevel:
+		return Black, BgYellow
+	}
+	return White, BgCyan
+}
 
-func (h CustomHandler) Handle(ctx context.Context, r slog.Record) error {
+func (l LogLevel) Tag() string {
+	tagFg, tagBg := l.TagColor()
+	return Colorize(" "+l.String()[:4]+" ", tagFg, tagBg)
+}
+
+// func Handle takes a [slog.Record] and appends data to a buffer that is
+// written to an output stream via an [io.Writer]
+//
+// Implements [slog.Handler].Handle
+func (l Logger) Handle(ctx context.Context, r slog.Record) error {
+	if !l.Enabled(ctx, r.Level) {
+		return nil
+	}
+
+	data := bytes.NewBuffer([]byte(LogLevel(r.Level).Tag() + " "))
+
+	// Format Time
+	data.WriteString(r.Time.Format(l.Options.TimeLayout) + " ")
+
+	if len(l.Options.Prefix) > 0 {
+		data.WriteString(l.Options.Prefix + " ")
+	}
+	// Format Message
+	data.WriteString(r.Message + " ")
+
+	// Format Attrs
+	r.Attrs(func(a slog.Attr) bool {
+		data.WriteString(fmt.Sprintf("%v: %v ", a.Key, a.Value))
+		return true
+	})
+
+	data.WriteRune('\n')
+	l.Mu.Lock()
+
+	defer l.Mu.Unlock()
+	if c, err := data.WriteTo(l.Writer); err != nil {
+		return fmt.Errorf("write failed with code %v %v", c, err.Error())
+	}
+
 	return nil
 }
 
-func (h CustomHandler) Enabled(ctx context.Context, l slog.Level) bool {
-	return h.Options.Level <= l
+// Implements [slog.Handler].Enabled
+func (l Logger) Enabled(ctx context.Context, lvl slog.Level) bool {
+	return lvl >= l.Options.Level
 }
 
-func (h CustomHandler) WithAttrs(attrs []slog.Attr) CustomHandler {
-	return h
+// Implements [slog.Handler].WithAttrs
+func (l Logger) WithAttrs(attrs []slog.Attr) slog.Handler {
+	l.Attrs = append(l.Attrs, attrs...)
+	return l
 }
 
-func (h CustomHandler) WithGroup(name string) CustomHandler {
-	return h
+// func WithGroup appends the prefix to the buffer
+//
+// Implements [slog.Handler].WithGroup
+func (l Logger) WithGroup(name string) slog.Handler {
+	l.Options.Prefix = fmt.Sprintf("%v.%v", l.Options.Prefix, name)
+	return l
+}
+
+func (l Logger) Log(lvl LogLevel, msg interface{}, args ...interface{}) error {
+	r := slog.NewRecord(time.Now(), slog.Level(lvl), fmt.Sprint(msg), 0)
+	pc, _, _, ok := runtime.Caller(0)
+	if ok {
+		r.PC = pc
+	}
+
+	if err := l.Handle(l.Ctx, r); err != nil {
+		return err
+	} else {
+		return nil
+	}
+}
+
+func (l *Logger) Debug(msg interface{}, keyvals ...interface{}) {
+	l.Log(DebugLevel, msg, keyvals...)
+}
+
+func (l *Logger) Info(msg interface{}, keyvals ...interface{}) {
+	l.Log(InfoLevel, msg, keyvals...)
+}
+
+func (l *Logger) Warn(msg interface{}, keyvals ...interface{}) {
+	l.Log(WarnLevel, msg, keyvals...)
+}
+
+func (l *Logger) Error(msg interface{}, keyvals ...interface{}) {
+	l.Log(ErrorLevel, msg, keyvals...)
+}
+
+func (l *Logger) Fatal(msg interface{}, keyvals ...interface{}) {
+	l.Log(FatalLevel, msg, keyvals...)
+	os.Exit(1)
+}
+
+func (l *Logger) Print(msg interface{}, keyvals ...interface{}) {
+	l.Log(NoLevel, msg, keyvals...)
+}
+
+func (l *Logger) SetLevel(lvl LogLevel) {
+	l.Options.Level = slog.Level(lvl)
+}
+
+func NewLogger(w io.Writer, l LogLevel, p string) *Logger {
+	return &Logger{
+		Options: HandlerOpts{
+			Level:      slog.Level(l),
+			TimeLayout: time.RFC822Z,
+			Prefix:     p,
+		},
+		Writer: w,
+		Ctx:    context.Background(),
+		Mu:     &sync.Mutex{},
+	}
+}
+
+func DefaultLogger() *Logger {
+	return NewLogger(os.Stdout, InfoLevel, "")
 }
