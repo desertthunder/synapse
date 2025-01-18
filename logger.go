@@ -102,22 +102,22 @@ func (l LogLevel) String() string {
 		return "WARNING"
 	case FatalLevel:
 		return "FATAL"
+	default:
+		return "INFO"
 	}
-
-	return "INFO"
 }
 
 func (l LogLevel) TagColor() (fg ANSIColor, bg ANSIColor) {
 	switch l {
-	case ErrorLevel:
-	case CriticalLevel:
+	case CriticalLevel, ErrorLevel, FatalLevel:
 		return White, BgRed
-	case DebugLevel:
-		return BoldWhite, BgBlue
+	case InfoLevel:
+		return BoldWhite, BgCyan
 	case WarnLevel:
 		return Black, BgYellow
+	default:
+		return White, BgBlue
 	}
-	return White, BgCyan
 }
 
 func (l LogLevel) Tag() string {
@@ -136,16 +136,14 @@ func (l Logger) Handle(ctx context.Context, r slog.Record) error {
 
 	data := bytes.NewBuffer([]byte(LogLevel(r.Level).Tag() + " "))
 
-	// Format Time
 	data.WriteString(r.Time.Format(l.Options.TimeLayout) + " ")
 
 	if len(l.Options.Prefix) > 0 {
 		data.WriteString(l.Options.Prefix + " ")
 	}
-	// Format Message
+
 	data.WriteString(r.Message + " ")
 
-	// Format Attrs
 	r.Attrs(func(a slog.Attr) bool {
 		data.WriteString(fmt.Sprintf("%v: %v ", a.Key, a.Value))
 		return true
@@ -182,10 +180,32 @@ func (l Logger) WithGroup(name string) slog.Handler {
 }
 
 func (l Logger) Log(lvl LogLevel, msg interface{}, args ...interface{}) error {
+	kvs := make([]interface{}, len(args))
+	if i := copy(kvs, args); i != len(args) {
+		return fmt.Errorf(
+			"unable to properly copy all args (%v of %v items) passed to logger",
+			i, len(args),
+		)
+	}
+
 	r := slog.NewRecord(time.Now(), slog.Level(lvl), fmt.Sprint(msg), 0)
 	pc, _, _, ok := runtime.Caller(0)
 	if ok {
 		r.PC = pc
+	}
+
+	if len(kvs)%2 != 0 {
+		kvs = append(kvs, "None")
+	}
+
+	for i, kv := range kvs {
+		if (i+1)%2 != 0 {
+			continue
+		}
+		r.AddAttrs(slog.Attr{
+			Key:   kvs[i-1].(string),
+			Value: slog.AnyValue(kv),
+		})
 	}
 
 	if err := l.Handle(l.Ctx, r); err != nil {
@@ -228,7 +248,7 @@ func NewLogger(w io.Writer, l LogLevel, p string) *Logger {
 	return &Logger{
 		Options: HandlerOpts{
 			Level:      slog.Level(l),
-			TimeLayout: time.RFC822Z,
+			TimeLayout: time.RFC3339,
 			Prefix:     p,
 		},
 		Writer: w,
