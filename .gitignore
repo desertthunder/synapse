@@ -21,7 +21,10 @@
 go.work
 go.work.sum
 
+# Added by gh/desertthunder
 .env
 tmp/
 dist/
 local.coverage.txt
+*.db
+*.sqlite3
