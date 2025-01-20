@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -21,8 +22,8 @@ type Context struct {
 }
 
 type Settings struct {
-	MaxRetries   uint
-	MaxProcesses uint8
+	MaxRetries   int
+	MaxProcesses int
 }
 
 type Worker struct {
@@ -33,21 +34,23 @@ type Worker struct {
 }
 
 func NewTicker(i int) *Ticker {
-	var interval time.Duration = time.Duration(i)
-	return &Ticker{interval: interval, done: make(chan bool), t: time.NewTicker(interval * time.Second)}
+	interval := time.Duration(i)
+	return &Ticker{
+		done:     make(chan bool),
+		interval: interval,
+		t:        time.NewTicker(interval * time.Second),
+	}
 }
 
-func NewWorker(retries uint, processes uint8, l *Logger) Worker {
-	if l == nil {
-		return Worker{
-			Logger:   logger,
-			Settings: Settings{retries, processes},
-		}
-	}
+func NewWorker(retries int, processes int, hr int) Worker {
+	c := Context{}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 
 	return Worker{
-		Logger:   l,
+		Logger:   logger,
 		Settings: Settings{retries, processes},
+		Context:  &c,
+		Ticker:   NewTicker(hr),
 	}
 }
 
@@ -56,49 +59,83 @@ func (w *Worker) DoWork() error {
 	return nil
 }
 
-func (w *Worker) StartHeartbeat() {
+func (w *Worker) StartListener() {
+	sigChannel := make(chan os.Signal, 1)
+	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM)
+	messenger := make(chan string)
+
 	go func() {
 		for {
 			select {
 			case <-w.Ticker.done:
 				return
 			case t := <-w.Ticker.t.C:
-				msg := fmt.Sprintf("heartbeat at %v", t.Format(time.DateTime))
-				w.Logger.Info(msg)
+				messenger <- fmt.Sprintf("heartbeat at %v", t.Format(time.DateTime))
 			}
 		}
 	}()
-}
 
-func (w *Worker) ListenForSignals() {
-	sigChannel := make(chan os.Signal, 1)
-	done := make(chan bool)
-	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for {
+			w.Logger.Info(<-messenger)
+		}
+	}()
 
 	go func() {
 		sig := <-sigChannel
-		done <- true
-		w.Logger.Info("received signal " + sig.String())
+		w.Logger.Info("received signal: " + sig.String())
+		w.Ticker.done <- true
 	}()
 
-	<-done
+	<-w.Ticker.done
 	w.Ticker.t.Stop()
 }
 
-func (w *Worker) CreateContext() {
-	w.Context = &Context{}
-	w.Context.ctx, w.Context.cancel = context.WithCancel(context.Background())
+// ParseArgs is a part of the [Commander] interface implementation
+func ParseWorkerArgs(args []string) map[string]int {
+	parsed := make(map[string]int, 3)
+	parsed["heartRate"] = 2
+	parsed["retries"] = 3
+	parsed["processes"] = 1
+
+	for i, arg := range args {
+		var val string
+
+		if i != len(args)-1 {
+			val = args[i+1]
+		} else {
+			break
+		}
+
+		value, err := strconv.Atoi(val)
+		if err != nil {
+			logger.Error(fmt.Printf("unable to parse %v value %v", arg, err.Error()))
+		}
+
+		switch arg {
+		case "--heartrate", "--hr", "-heartrate", "-hr":
+			parsed["heartRate"] = value
+		case "--retries", "--r", "-retries", "-r":
+			parsed["retries"] = value
+		case "--processes", "--p", "-processes", "-p":
+			parsed["processes"] = value
+		}
+	}
+
+	return parsed
 }
 
-func (w *Worker) CreateTicker(sec int) {
-	w.Ticker = NewTicker(sec)
-}
+// func Run "turns on the bot," i.e. starts the worker and parses the command-line
+// argument slice from [ParseArgs]
+func Run(args []string) error {
+	parsed := ParseWorkerArgs(args)
+	w := NewWorker(parsed["retries"], parsed["processes"], parsed["heartRate"])
 
-func (w *Worker) Run() {
-	w.Logger.Info("starting worker...")
-	w.CreateContext()
-	w.CreateTicker(5)
-	w.StartHeartbeat()
-	w.ListenForSignals()
-	w.DoWork()
+	w.StartListener()
+
+	if err := w.DoWork(); err != nil {
+		return err
+	} else {
+		return nil
+	}
 }
