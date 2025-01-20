@@ -66,6 +66,8 @@ type HandlerOpts struct {
 //
 // It uses a pointer to a [sync.Mutex] to ensure that no other goroutines access the
 // data passed through an io.Writer
+//
+// TODO: formatted methods
 type Logger struct {
 	Options HandlerOpts
 	Writer  io.Writer
@@ -219,8 +221,16 @@ func (l *Logger) Debug(msg interface{}, keyvals ...interface{}) {
 	l.Log(DebugLevel, msg, keyvals...)
 }
 
+func (l *Logger) Debugf(format string, args ...interface{}) {
+	l.Log(DebugLevel, fmt.Sprintf(format, args...))
+}
+
 func (l *Logger) Info(msg interface{}, keyvals ...interface{}) {
 	l.Log(InfoLevel, msg, keyvals...)
+}
+
+func (l *Logger) Infof(format string, args ...interface{}) {
+	l.Log(InfoLevel, fmt.Sprintf(format, args...))
 }
 
 func (l *Logger) Warn(msg interface{}, keyvals ...interface{}) {
@@ -229,6 +239,10 @@ func (l *Logger) Warn(msg interface{}, keyvals ...interface{}) {
 
 func (l *Logger) Error(msg interface{}, keyvals ...interface{}) {
 	l.Log(ErrorLevel, msg, keyvals...)
+}
+
+func (l *Logger) Errorf(format string, args ...interface{}) {
+	l.Log(ErrorLevel, fmt.Sprintf(format, args...))
 }
 
 func (l *Logger) Fatal(msg interface{}, keyvals ...interface{}) {
@@ -258,5 +272,5 @@ func NewLogger(w io.Writer, l LogLevel, p string) *Logger {
 }
 
 func DefaultLogger() *Logger {
-	return NewLogger(os.Stdout, InfoLevel, "")
+	return NewLogger(os.Stdout, DebugLevel, "")
 }
